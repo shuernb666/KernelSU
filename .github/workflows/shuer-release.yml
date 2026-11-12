@@ -2,16 +2,60 @@ name: Shuer Manager
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ "main" ]
-    paths:
-      - '.github/workflows/shuer-release.yml'
 
 permissions:
   contents: read
 
 jobs:
-  build:
+  key:
+    runs-on: ubuntu-latest
+    outputs:
+      cert_size: ${{ steps.key.outputs.cert_size }}
+      cert_hash: ${{ steps.key.outputs.cert_hash }}
+      keystore_b64: ${{ steps.key.outputs.keystore_b64 }}
+      store_pass: ${{ steps.key.outputs.store_pass }}
+      alias: ${{ steps.key.outputs.alias }}
+    steps:
+      - name: Prepare signing key
+        id: key
+        run: |
+          set -e
+          if [ -n "${{ secrets.KEYSTORE }}" ]; then
+            echo "${{ secrets.KEYSTORE }}" | base64 -d > key.jks
+            ALIAS="${{ secrets.KEY_ALIAS }}"
+            PASS="${{ secrets.KEYSTORE_PASSWORD }}"
+            KEYPASS="${{ secrets.KEY_PASSWORD }}"
+          else
+            PASS=$(head -c 64 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 32)
+            KEYPASS="$PASS"
+            ALIAS=shuer
+            keytool -genkeypair -v -keystore key.jks -storetype JKS -alias "$ALIAS" \
+              -keyalg RSA -keysize 4096 -validity 10000 \
+              -dname "CN=Shuer, OU=Shuer Mod, O=Shuer, L=CN, ST=CN, C=CN" \
+              -storepass "$PASS" -keypass "$KEYPASS"
+          fi
+          keytool -exportcert -alias "$ALIAS" -keystore key.jks -storepass "$PASS" -file cert.der
+          SIZE_HEX=$(printf '0x%04x' $(stat -c%s cert.der))
+          HASH=$(sha256sum cert.der | awk '{print $1}')
+          echo "cert_size=$SIZE_HEX" >> $GITHUB_OUTPUT
+          echo "cert_hash=$HASH" >> $GITHUB_OUTPUT
+          echo "keystore_b64=$(base64 -w0 key.jks)" >> $GITHUB_OUTPUT
+          echo "store_pass=$PASS" >> $GITHUB_OUTPUT
+          echo "key_pass=$KEYPASS" >> $GITHUB_OUTPUT
+          echo "alias=$ALIAS" >> $GITHUB_OUTPUT
+          echo "Certificate size: $SIZE_HEX"
+          echo "Certificate sha256: $HASH"
+
+  lkm:
+    needs: key
+    uses: ./.github/workflows/build-lkm.yml
+    with:
+      package_name: com.shuer.cn
+      expected_size: ${{ needs.key.outputs.cert_size }}
+      expected_hash: ${{ needs.key.outputs.cert_hash }}
+
+  apk:
+    needs: key
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -50,49 +94,38 @@ jobs:
           source .github/scripts/setup-rust-build.sh x86_64-linux-android 26
           cargo build --target x86_64-linux-android --release --manifest-path ./userspace/ksud/Cargo.toml
 
-      - name: Prepare signing key
+      - name: Restore signing key
+        env:
+          KEYSTORE_B64: ${{ needs.key.outputs.keystore_b64 }}
+          STORE_PASS: ${{ needs.key.outputs.store_pass }}
+          KEY_ALIAS: ${{ needs.key.outputs.alias }}
         run: |
-          set -e
-          if [ -n "${{ secrets.KEYSTORE }}" ]; then
-            echo "${{ secrets.KEYSTORE }}" | base64 -d > key.jks
-            echo "KEYSTORE_PASSWORD=${{ secrets.KEYSTORE_PASSWORD }}" >> $GITHUB_ENV
-            echo "KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}" >> $GITHUB_ENV
-            echo "KEY_ALIAS=${{ secrets.KEY_ALIAS }}" >> $GITHUB_ENV
-            echo "GENERATED=0" >> $GITHUB_ENV
-          else
-            STORE_PASS=$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 32)
-            keytool -genkeypair -v -keystore key.jks -storetype JKS -alias shuer \
-              -keyalg RSA -keysize 4096 -validity 10000 \
-              -dname "CN=Shuer, OU=Shuer Mod, O=Shuer, L=CN, ST=CN, C=CN" \
-              -storepass "$STORE_PASS" -keypass "$STORE_PASS"
-            echo "KEYSTORE_PASSWORD=$STORE_PASS" >> $GITHUB_ENV
-            echo "KEY_PASSWORD=$STORE_PASS" >> $GITHUB_ENV
-            echo "KEY_ALIAS=shuer" >> $GITHUB_ENV
-            echo "GENERATED=1" >> $GITHUB_ENV
-            base64 -w0 key.jks > shuer-keystore.jks.b64
-          fi
-
-      - name: Write gradle.properties
-        run: |
+          echo "$KEYSTORE_B64" | base64 -d > key.jks
           {
             echo "KEYSTORE_FILE=$(pwd)/key.jks"
-            echo "KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD"
+            echo "KEYSTORE_PASSWORD=$STORE_PASS"
             echo "KEY_ALIAS=$KEY_ALIAS"
-            echo "KEY_PASSWORD=$KEY_PASSWORD"
+            echo "KEY_PASSWORD=$STORE_PASS"
           } >> manager/gradle.properties
 
       - name: Build manager
         working-directory: ./manager
+        env:
+          KEYSTORE_PASSWORD: ${{ needs.key.outputs.store_pass }}
+          KEY_ALIAS: ${{ needs.key.outputs.alias }}
         run: ./gradlew clean assembleRelease -PKSU_PACKAGE_NAME=com.shuer.cn -PKSU_NAME=鼠二
 
       - name: Repack and sign
+        env:
+          KEYSTORE_PASSWORD: ${{ needs.key.outputs.store_pass }}
+          KEY_ALIAS: ${{ needs.key.outputs.alias }}
         run: |
           set -e
           python3 repack_apk.py repack \
             -b release -t release \
             -a arm64-v8a \
             -K key.jks -A "$KEY_ALIAS" \
-            -P "$KEYSTORE_PASSWORD" -S "$KEY_PASSWORD" \
+            -P "$KEYSTORE_PASSWORD" -S "$KEYSTORE_PASSWORD" \
             -n "Shuer_$(date +%Y%m%d)" --strip
           ls -la dist/
 
@@ -102,9 +135,22 @@ jobs:
           name: shuer-apk
           path: dist/*.apk
 
-      - name: Upload generated keystore
-        if: env.GENERATED == '1'
+      - name: Upload signing key bundle
+        env:
+          KEYSTORE_B64: ${{ needs.key.outputs.keystore_b64 }}
+          STORE_PASS: ${{ needs.key.outputs.store_pass }}
+          KEY_ALIAS: ${{ needs.key.outputs.alias }}
+        run: |
+          cat > signing-key.txt <<EOF
+          keystore_base64=$KEYSTORE_B64
+          keystore_password=$STORE_PASS
+          key_alias=$KEY_ALIAS
+          cert_sha256=${{ needs.key.outputs.cert_hash }}
+          cert_size=${{ needs.key.outputs.cert_size }}
+          EOF
+
+      - name: Upload key bundle
         uses: actions/upload-artifact@v7
         with:
-          name: shuer-keystore
-          path: shuer-keystore.jks.b64
+          name: shuer-signing-key
+          path: signing-key.txt
