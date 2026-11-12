@@ -164,7 +164,7 @@ jobs:
         run: |
           cat > signing-key.txt <<EOF
           keystore_base64=$KEYSTORE_B64
-          keykspwword=$STORE_PASS
+          keystore_password=$STORE_PASS
           key_alias=shuer
           cert_sha256=$CERT_HASH
           cert_size=$CERT_SIZE
