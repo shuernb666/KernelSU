@@ -19,8 +19,7 @@ jobs:
     outputs:
       cert_size: ${{ steps.key.outputs.cert_size }}
       cert_hash: ${{ steps.key.outputs.cert_hash }}
-      keystore_b64: ${{ steps.key.outputs.keystore_b64 }}
-      kspw: ${{ steps.key.outputs.kspw }}
+      bundle: ${{ steps.key.outputs.bundle }}
       alias: ${{ steps.key.outputs.alias }}
     steps:
       - name: Prepare signing key
@@ -53,8 +52,7 @@ jobs:
           HASH=$(sha256sum cert.der | awk '{print $1}')
           echo "cert_size=$SIZE_HEX" >> $GITHUB_OUTPUT
           echo "cert_hash=$HASH" >> $GITHUB_OUTPUT
-          echo "keystore_b64=$(base64 -w0 key.jks)" >> $GITHUB_OUTPUT
-          echo "kspw=$PASS" >> $GITHUB_OUTPUT
+          echo "bundle=$(printf '%s' "$PASS" | base64 -w0)|$(base64 -w0 key.jks)" >> $GITHUB_OUTPUT
           echo "alias=$ALIAS" >> $GITHUB_OUTPUT
           echo "cert: $SIZE_HEX / $HASH"
 
@@ -122,17 +120,23 @@ jobs:
 
       - name: Restore signing key
         env:
-          KEYSTORE_B64: ${{ needs.key.outputs.keystore_b64 }}
-          STORE_PASS: ${{ needs.key.outputs.kspw }}
-          KEY_ALIAS: ${{ needs.key.outputs.alias }}
+          BUNDLE: ${{ needs.key.outputs.bundle }}
         run: |
-          echo "$KEYSTORE_B64" | base64 -d > key.jks
+          set -e
+          PW_B64="${BUNDLE%%|*}"
+          KS_B64="${BUNDLE#*|}"
+          PASS=$(printf '%s' "$PW_B64" | base64 -d)
+          echo "::add-mask::$PASS"
+          echo "$KS_B64" | base64 -d > key.jks
           {
             echo "KEYSTORE_FILE=$(pwd)/key.jks"
-            echo "KEYSTORE_PASSWORD=$STORE_PASS"
-            echo "KEY_ALIAS=$KEY_ALIAS"
-            echo "KEY_PASSWORD=$STORE_PASS"
+            echo "KEYSTORE_PASSWORD=$PASS"
+            echo "KEY_ALIAS=shuer"
+            echo "KEY_PASSWORD=$PASS"
           } >> manager/gradle.properties
+          echo "STORE_PASS=$PASS" >> $GITHUB_ENV
+          echo "KS_B64=$KS_B64" >> $GITHUB_ENV
+          stat -c%s key.jks
 
       - name: Build manager
         working-directory: ./manager
@@ -140,8 +144,7 @@ jobs:
 
       - name: Repack and sign
         env:
-          STORE_PASS: ${{ needs.key.outputs.kspw }}
-          ALIAS: ${{ needs.key.outputs.alias }}
+          ALIAS: shuer
         run: |
           set -e
           python3 repack_apk.py repack -b release -t release -a arm64-v8a \
@@ -157,13 +160,12 @@ jobs:
 
       - name: Upload signing key bundle
         env:
-          KEYSTORE_B64: ${{ needs.key.outputs.keystore_b64 }}
-          STORE_PASS: ${{ needs.key.outputs.kspw }}
+          KEYSTORE_B64: ${{ needs.key.outputs.bundle }}
           CERT_HASH: ${{ needs.key.outputs.cert_hash }}
           CERT_SIZE: ${{ needs.key.outputs.cert_size }}
         run: |
           cat > signing-key.txt <<EOF
-          keystore_base64=$KEYSTORE_B64
+          keystore_base64=$KS_B64
           keystore_password=$STORE_PASS
           key_alias=shuer
           cert_sha256=$CERT_HASH
