@@ -1,0 +1,110 @@
+name: Shuer Manager
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main" ]
+    paths:
+      - '.github/workflows/shuer-release.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup Java
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Setup NDK
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r29
+
+      - name: Setup Rust
+        run: |
+          rustup update stable
+          rustup target add aarch64-linux-android
+          rustup target add x86_64-linux-android
+
+      - name: Build ksud
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          set -e
+          source .github/scripts/setup-rust-build.sh aarch64-linux-android 26
+          cargo build --target aarch64-linux-android --release --manifest-path ./userspace/ksud/Cargo.toml
+          source .github/scripts/setup-rust-build.sh x86_64-linux-android 26
+          cargo build --target x86_64-linux-android --release --manifest-path ./userspace/ksud/Cargo.toml
+
+      - name: Prepare signing key
+        run: |
+          set -e
+          if [ -n "${{ secrets.KEYSTORE }}" ]; then
+            echo "${{ secrets.KEYSTORE }}" | base64 -d > key.jks
+            echo "KEYSTORE_PASSWORD=${{ secrets.KEYSTORE_PASSWORD }}" >> $GITHUB_ENV
+            echo "KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}" >> $GITHUB_ENV
+            echo "KEY_ALIAS=${{ secrets.KEY_ALIAS }}" >> $GITHUB_ENV
+            echo "GENERATED=0" >> $GITHUB_ENV
+          else
+            STORE_PASS=$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 32)
+            keytool -genkeypair -v -keystore key.jks -storetype JKS -alias shuer \
+              -keyalg RSA -keysize 4096 -validity 10000 \
+              -dname "CN=Shuer, OU=Shuer Mod, O=Shuer, L=CN, ST=CN, C=CN" \
+              -storepass "$STORE_PASS" -keypass "$STORE_PASS"
+            echo "KEYSTORE_PASSWORD=$STORE_PASS" >> $GITHUB_ENV
+            echo "KEY_PASSWORD=$STORE_PASS" >> $GITHUB_ENV
+            echo "KEY_ALIAS=shuer" >> $GITHUB_ENV
+            echo "GENERATED=1" >> $GITHUB_ENV
+            base64 -w0 key.jks > shuer-keystore.jks.b64
+          fi
+
+      - name: Write gradle.properties
+        run: |
+          {
+            echo "KEYSTORE_FILE=$(pwd)/key.jks"
+            echo "KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD"
+            echo "KEY_ALIAS=$KEY_ALIAS"
+            echo "KEY_PASSWORD=$KEY_PASSWORD"
+          } >> manager/gradle.properties
+
+      - name: Build manager
+        working-directory: ./manager
+        run: ./gradlew clean assembleRelease -PKSU_PACKAGE_NAME=com.shuer.cn -PKSU_NAME=鼠二
+
+      - name: Repack and sign
+        run: |
+          set -e
+          python3 repack_apk.py repack \
+            -b release -t release \
+            -a arm64-v8a \
+            -K key.jks -A "$KEY_ALIAS" \
+            -P "$KEYSTORE_PASSWORD" -S "$KEY_PASSWORD" \
+            -n "Shuer_$(date +%Y%m%d)" --strip
+          ls -la dist/
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: shuer-apk
+          path: dist/*.apk
+
+      - name: Upload generated keystore
+        if: env.GENERATED == '1'
+        uses: actions/upload-artifact@v7
+        with:
+          name: shuer-keystore
+          path: shuer-keystore.jks.b64
