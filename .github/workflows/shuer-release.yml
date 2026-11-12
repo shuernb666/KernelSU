@@ -6,7 +6,7 @@ on:
       keystore:
         description: 'base64 of JKS (optional, overrides random keygen)'
         required: false
-      store_pass:
+      kspw:
         description: 'keystore password (optional)'
         required: false
 
@@ -20,14 +20,14 @@ jobs:
       cert_size: ${{ steps.key.outputs.cert_size }}
       cert_hash: ${{ steps.key.outputs.cert_hash }}
       keystore_b64: ${{ steps.key.outputs.keystore_b64 }}
-      store_pass: ${{ steps.key.outputs.store_pass }}
+      kspw: ${{ steps.key.outputs.kspw }}
       alias: ${{ steps.key.outputs.alias }}
     steps:
       - name: Prepare signing key
         id: key
         env:
           IN_KS: ${{ inputs.keystore }}
-          IN_PASS: ${{ inputs.store_pass }}
+          IN_PASS: ${{ inputs.kspw }}
           S_KS: ${{ secrets.KEYSTORE }}
           S_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
           S_ALIAS: ${{ secrets.KEY_ALIAS }}
@@ -54,7 +54,7 @@ jobs:
           echo "cert_size=$SIZE_HEX" >> $GITHUB_OUTPUT
           echo "cert_hash=$HASH" >> $GITHUB_OUTPUT
           echo "keystore_b64=$(base64 -w0 key.jks)" >> $GITHUB_OUTPUT
-          echo "store_pass=$PASS" >> $GITHUB_OUTPUT
+          echo "kspw=$PASS" >> $GITHUB_OUTPUT
           echo "alias=$ALIAS" >> $GITHUB_OUTPUT
           echo "cert: $SIZE_HEX / $HASH"
 
@@ -123,7 +123,7 @@ jobs:
       - name: Restore signing key
         env:
           KEYSTORE_B64: ${{ needs.key.outputs.keystore_b64 }}
-          STORE_PASS: ${{ needs.key.outputs.store_pass }}
+          STORE_PASS: ${{ needs.key.outputs.kspw }}
           KEY_ALIAS: ${{ needs.key.outputs.alias }}
         run: |
           echo "$KEYSTORE_B64" | base64 -d > key.jks
@@ -140,7 +140,7 @@ jobs:
 
       - name: Repack and sign
         env:
-          STORE_PASS: ${{ needs.key.outputs.store_pass }}
+          STORE_PASS: ${{ needs.key.outputs.kspw }}
           ALIAS: ${{ needs.key.outputs.alias }}
         run: |
           set -e
@@ -158,13 +158,13 @@ jobs:
       - name: Upload signing key bundle
         env:
           KEYSTORE_B64: ${{ needs.key.outputs.keystore_b64 }}
-          STORE_PASS: ${{ needs.key.outputs.store_pass }}
+          STORE_PASS: ${{ needs.key.outputs.kspw }}
           CERT_HASH: ${{ needs.key.outputs.cert_hash }}
           CERT_SIZE: ${{ needs.key.outputs.cert_size }}
         run: |
           cat > signing-key.txt <<EOF
           keystore_base64=$KEYSTORE_B64
-          keystore_password=$STORE_PASS
+          keykspwword=$STORE_PASS
           key_alias=shuer
           cert_sha256=$CERT_HASH
           cert_size=$CERT_SIZE
