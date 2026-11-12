@@ -1,0 +1,12 @@
+name: Shuer LKM
+
+on:
+  workflow_dispatch:
+
+jobs:
+  lkm:
+    uses: ./.github/workflows/build-lkm.yml
+    with:
+      package_name: com.shuer.cn
+      expected_size: '0x055f'
+      expected_hash: 'b82b6f0dca47af4a11532b2cecf390a37a940af7a002fd462f1ee92aece6849a'
