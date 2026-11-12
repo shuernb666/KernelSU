@@ -120,14 +120,17 @@ jobs:
 
       - name: Restore signing key
         env:
-          BUNDLE: ${{ needs.key.outputs.bundle }}
+          IN_KS: ${{ inputs.keystore }}
+          IN_PASS: ${{ inputs.kspw }}
+          S_KS: ${{ secrets.KEYSTORE }}
+          S_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
         run: |
           set -e
-          PW_B64="${BUNDLE%%|*}"
-          KS_B64="${BUNDLE#*|}"
-          PASS=$(printf '%s' "$PW_B64" | base64 -d)
+          if [ -n "$S_KS" ]; then KS_B64="$S_KS"; PASS="$S_PASS"
+          elif [ -n "$IN_KS" ]; then KS_B64="$IN_KS"; PASS="$IN_PASS"
+          else echo "::error::no keystore provided (input or secret)"; exit 1; fi
           echo "::add-mask::$PASS"
-          echo "$KS_B64" | base64 -d > key.jks
+          printf '%s' "$KS_B64" | base64 -d > key.jks
           {
             echo "KEYSTORE_FILE=$(pwd)/key.jks"
             echo "KEYSTORE_PASSWORD=$PASS"
